@@ -79,7 +79,9 @@ def process_plural(msgid, msgid_plural, msgstrs, file, line):
       continue
 
     actual = set(extract(msgstr))
-    missing = expected - actual
+    # allow missing placeholders in singular forms (n=0, n=1) since
+    # translators often omit e.g. {count} ("No items", "One item")
+    missing = expected - actual if idx >= 2 else set()
     extra = actual - expected
 
     if len(missing) or len(extra):
