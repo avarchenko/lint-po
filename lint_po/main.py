@@ -69,12 +69,54 @@ def process_pair(msgid, msgstr, file, line):
   return True
 
 
+def process_plural(msgid, msgid_plural, msgstrs, file, line):
+  # all placeholders that appear across msgid and msgid_plural
+  expected = set(extract(msgid)) | set(extract(msgid_plural))
+
+  ok = True
+  for idx, msgstr in msgstrs.items():
+    if not msgstr:
+      continue
+
+    actual = set(extract(msgstr))
+    # allow missing placeholders in singular forms (n=0, n=1) since
+    # translators often omit e.g. {count} ("No items", "One item")
+    missing = expected - actual if idx >= 2 else set()
+    extra = actual - expected
+
+    if len(missing) or len(extra):
+      message = ""
+      if len(missing):
+        message += fail(f"Missing from msgstr[{idx}]: {', '.join(missing)}", file, line)
+      if len(extra):
+        message += fail(f"Unexpected in msgstr[{idx}]: {', '.join(extra)}", file, line)
+      message += f"  at {file}:{line}"
+
+      print(f"Difference between msgid=\"{msgid}\" and msgstr[{idx}]=\"{msgstr}\":\n{message}\n", file=stderr)
+      ok = False
+
+  return ok
+
+
 def process_file(filename, lines):
   errors = False
   state = 0
   msgid = None
+  msgid_plural = None
   msgstr = None
+  msgstrs = {}
+  msgstrs_idx = None
   msgstrlineno = 0
+
+  def reset():
+    nonlocal state, msgid, msgid_plural, msgstr, msgstrs, msgstrs_idx, msgstrlineno
+    state = 0
+    msgid = None
+    msgid_plural = None
+    msgstr = None
+    msgstrs = {}
+    msgstrs_idx = None
+    msgstrlineno = 0
 
   for lineno, line in enumerate(lines):
     if re.match(r'^#', line):
@@ -94,11 +136,16 @@ def process_file(filename, lines):
       warnings.warn(f"({state}) Unexpected input: {line}")
       errors = True
 
-    elif state == 1: # expecting `msgstr`, or more bits of previous msgid
+    elif state == 1: # expecting `msgstr`, `msgid_plural`, or more bits of previous msgid
       if m := re.match(r'^msgstr\s+(.*)$', line):
         msgstr = unqqbackslash(m[1])
         msgstrlineno = lineno + 1
         state = 2
+        continue
+
+      if m := re.match(r'^msgid_plural\s+(.*)$', line):
+        msgid_plural = unqqbackslash(m[1])
+        state = 3
         continue
 
       if re.match(r'^"', line):
@@ -113,10 +160,7 @@ def process_file(filename, lines):
         if not process_pair(msgid, msgstr, filename, msgstrlineno):
           errors = True
 
-        state = 0
-        msgid = None
-        msgstr = None
-        msgstrlineno = 0
+        reset()
         continue
 
       if re.match(r'^"', line):
@@ -126,8 +170,48 @@ def process_file(filename, lines):
       warnings.warn(f"({state}) Unexpected input: {line}")
       errors = True
 
-  if not process_pair(msgid, msgstr, filename, msgstrlineno):
-    errors = True
+    elif state == 3: # expecting `msgstr[0]`, or more bits of previous msgid_plural
+      if m := re.match(r'^msgstr\[(\d+)\]\s+(.*)$', line):
+        msgstrs_idx = int(m[1])
+        msgstrs[msgstrs_idx] = unqqbackslash(m[2])
+        msgstrlineno = lineno + 1
+        state = 4
+        continue
+
+      if re.match(r'^"', line):
+        msgid_plural += unqqbackslash(line)
+        continue
+
+      warnings.warn(f"({state}) Unexpected input: {line}")
+      errors = True
+
+    elif state == 4: # expecting newline, `msgstr[N+1]`, or more bits of previous msgstr[N]
+      if re.match(r'^$', line):
+        if not process_plural(msgid, msgid_plural, msgstrs, filename, msgstrlineno):
+          errors = True
+
+        reset()
+        continue
+
+      if m := re.match(r'^msgstr\[(\d+)\]\s+(.*)$', line):
+        msgstrs_idx = int(m[1])
+        msgstrs[msgstrs_idx] = unqqbackslash(m[2])
+        continue
+
+      if re.match(r'^"', line):
+        msgstrs[msgstrs_idx] += unqqbackslash(line)
+        continue
+
+      warnings.warn(f"({state}) Unexpected input: {line}")
+      errors = True
+
+  # handle EOF: flush whatever entry is pending
+  if state == 2:
+    if not process_pair(msgid, msgstr, filename, msgstrlineno):
+      errors = True
+  elif state == 4:
+    if not process_plural(msgid, msgid_plural, msgstrs, filename, msgstrlineno):
+      errors = True
 
   return errors
 
